@@ -1,0 +1,27 @@
+{
+    "name": "com.xrlab.labframe_garmin",
+    "version": "1.0.0",
+    "displayName": "Lab Frame 2023 - Garmin Watch Plugin",
+    "description": "Garmin Support for LabFrame2023.\nNote: Currently only supports PICO!!",
+    "unity": "2020.3",
+    "unityRelease": "33f1",
+    "documentationUrl": "https://github.com/ncu-wmlab/LabFrame2023",
+    "changelogUrl": "https://github.com/ncu-wmlab/LabFrame_EyeTrack",
+    "licensesUrl": "https://youtu.be/dQw4w9WgXcQ",
+    "dependencies":{
+      "com.xrlab.labframe": "0.0.8",
+      "com.xrlab.labframe_bluetooth" : "1.0.3"
+    },
+    "author": {
+      "name": "NCU wmlab & xrlab",
+      "email": "wmlabwmlab@gmail.com",
+      "url": "https://staff.csie.ncu.edu.tw/shihchingyeh/index2.html"
+    },
+    "samples": [
+      {
+        "displayName": "Sample",
+        "description": "You'll need XR Interaction Toolkit v.2.0 or newer to run this sample.",
+        "path": "Samples~/"
+      }
+    ]
+  } 

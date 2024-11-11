@@ -1,0 +1,17 @@
+{
+    "name": "LabFrame_Garmin",
+    "rootNamespace": "",
+    "references": [
+        "GUID:446fbb70571d4224d98108c0517d6b29",
+        "GUID:14d494662abfcec419157ddb8bc97a3f"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
