@@ -1,12 +1,12 @@
 {
     "name": "com.xrlab.labframe_garmin",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "displayName": "Lab Frame 2023 - Garmin Watch Plugin",
     "description": "Garmin Support for LabFrame2023.\nNote: Currently only supports PICO!!",
-    "unity": "2020.3",
-    "unityRelease": "33f1",
+    "unity": "2021.3",
+    "unityRelease": "9f1",
     "documentationUrl": "https://github.com/ncu-wmlab/LabFrame2023",
-    "changelogUrl": "https://github.com/ncu-wmlab/LabFrame_EyeTrack",
+    "changelogUrl": "https://github.com/ncu-wmlab/LabFrame_Garmin",
     "licensesUrl": "https://youtu.be/dQw4w9WgXcQ",
     "dependencies":{
       "com.xrlab.labframe": "0.0.8",

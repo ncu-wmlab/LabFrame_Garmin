@@ -46,35 +46,35 @@ public class GarminBluetoothManager : MonoBehaviour
     }
 
 
+
+    /// <summary>
+    /// 藍芽連線的總管，這邊就是用來接收從外部傳來的訊息，並且做出相對應的動作
+    /// </summary>
+    /// <param name="message"></param>
     public void ConnectionManager(string message)
     {
         if (message.Equals("connect"))
         {
-            Debug.Log("我在連接裝置");
             ConnectToDevice();
         }
         else if (message.Equals("stop"))
         {
-            Debug.Log("我在停止");
             CancelInvoke("StartReceiveData");
         }
         else if (message.Equals("disconnect"))
         {
-            Debug.Log("我在斷開裝置");
             //CancelInvoke("StartReceiveData");
             DisconnectDevice();
         }
 
         //Case start
+        bool messageIsSend = false;
+        while(!messageIsSend)
+        {
+            messageIsSend = bluetoothManager.Send(message);
+        }
         if (CheckStartString(message))
         {
-            Debug.Log("我在開始");
-            bool messageIsSend = false;
-            while(!messageIsSend)
-            {
-                messageIsSend = bluetoothManager.Send(message);
-            }
-            Debug.Log("發送成功");
             // Set the data receiving rate 
             StartCoroutine(ReceiveData());
         }
@@ -85,7 +85,6 @@ public class GarminBluetoothManager : MonoBehaviour
     // 取得藍牙裝置的 MAC 位址
     public string GetMacAddress()
     {
-        Debug.Log("我在找MAC");
         List<BluetoothDevice> devices = bluetoothManager.GetAvailableDevices();
         foreach (BluetoothDevice device in devices)
         {
@@ -101,14 +100,12 @@ public class GarminBluetoothManager : MonoBehaviour
     public void ConnectToDevice()
     {
         string macAddress = GetMacAddress();
-        Debug.Log("找到macAddress:" + macAddress);
         if (bluetoothManager.CheckAvailable())
         {
             // 使用 BluetoothManager 的方法連接裝置
             if(bluetoothManager.Connect(macAddress))
             {    
                 connectionStatus = true;
-                Debug.Log("連接成功");
             }
         }
         else
@@ -120,7 +117,6 @@ public class GarminBluetoothManager : MonoBehaviour
     // 發送數據
     public void SendData(string data)
     {
-        Debug.Log("我在發送數據");
         if (connectionStatus)
         {
             bool success = bluetoothManager.Send(data); // 使用 BluetoothManager 的 Send 方法
@@ -142,7 +138,6 @@ public class GarminBluetoothManager : MonoBehaviour
         {
             if (connectionStatus)
             {
-                Debug.Log("Disconnecting device...");
                 bluetoothManager.Stop(); // 使用 BluetoothManager 的方法斷開裝置
                 connectionStatus = false;
             }
@@ -166,8 +161,6 @@ public class GarminBluetoothManager : MonoBehaviour
     {
         while (bluetoothManager.IsConnected()) // While the device is connected
         {
-            Debug.Log(bluetoothManager.ReadLine()+"是我的訊息");
-            Debug.Log($"開始接收數據 {bluetoothManager.Available()}");
             if (bluetoothManager.Available() > 0)
             {
                 string data = bluetoothManager.ReadLine(); // Read data from BluetoothManager
@@ -176,12 +169,10 @@ public class GarminBluetoothManager : MonoBehaviour
                 if (endIndex != -1)
                 {
                     receivedData.Append(data.Substring(0, endIndex + 1)); // Append data up to and including the closing brace
-                    Debug.Log("Received Data: " + receivedData);
                     if(!receivedData.ToString().Equals("error"))
                     {
                         ProcessReceivedData(receivedData.ToString()); // Process the complete data
                     }
-                    Debug.Log("送資料" + receivedData.ToString());
                     receivedData.Clear(); // Clear the StringBuilder for the next set of datas
 
                     if(endIndex + 1 < data.Length)
@@ -198,18 +189,22 @@ public class GarminBluetoothManager : MonoBehaviour
         }
     }
 
+
+    /// <summary>
+    /// 將處理好的資料送到LabDataManager
+    /// </summary>
+    /// <param name="data"></param>
     private void ProcessReceivedData(string data)
     {
         List<LabGarminData> _dataList = DeserializeLabGarminDataList(data);
         foreach(LabGarminData _data in _dataList)
         {
-            Debug.Log("送資料" + _data);
             LabDataManager.Instance.WriteData(_data);
         }
     }
 
 
-    //光玄寫法
+    //光玄寫法，處理收到的資料變成json格式
     List<LabGarminData> DeserializeLabGarminDataList(string jsonString)
     {
         List<LabGarminData> dataList = new List<LabGarminData>();
@@ -236,26 +231,19 @@ public class GarminBluetoothManager : MonoBehaviour
                 data = JsonUtility.FromJson<LabGarminData>(tmpJson);
                 if (CheckDisconnectMessage(data.tag))
                 {
-                    Debug.Log("Android device is disconnected.");
                     DisconnectDevice();
                     return dataList;
                 }
                 else
                 {
                     labGarminData = data;
-                    Debug.Log($"HeartRate: {data.heartRate}, " +
-                        $"HeartVariability: {data.heartRateVariability}, " +
-                        $"StressLevel: {data.stressLevel}, " +
-                        $"SPO2: {data.SPO2}, " +
-                        $"Respiration: {data.respiration}, tag: {data.tag}, time: {data.time}");
                     dataList.Add(data);
                     incompleteData = "";
-                    Debug.Log("Incomplete data process successfully.");
                 }
             }
-            catch
+            catch(Exception ex)
             {
-                Debug.Log("incomplete data: " + tmpJson);
+                Debug.LogWarning($"Failed to deserialize data, because of {ex.Message}");
                 incompleteData = "";
             }
         }
@@ -277,20 +265,12 @@ public class GarminBluetoothManager : MonoBehaviour
                 data = JsonUtility.FromJson<LabGarminData>(json);
                 if (CheckDisconnectMessage(data.tag))
                 {
-                    Debug.Log("Android device is disconnected.");
                     DisconnectDevice();
                     return dataList;
                 }
                 else
                 {
                     labGarminData = data;
-
-                    Debug.Log($"HeartRate: {data.heartRate}, " +
-                        $"HeartVariability: {data.heartRateVariability}, " +
-                        $"StressLevel: {data.stressLevel}, " +
-                        $"SPO2: {data.SPO2}, " +
-                        $"Respiration: {data.respiration}, tag: {data.tag}, time: {data.time}");
-
                     dataList.Add(data);
                 }
             }
@@ -310,7 +290,7 @@ public class GarminBluetoothManager : MonoBehaviour
         return dataList;
     }
 
-    //光玄寫法
+    //光玄寫法 : 就是用來檢查是否是斷線訊息
     bool CheckDisconnectMessage(string str)
     {
         if (str.Equals("device_disconnect"))
@@ -320,7 +300,11 @@ public class GarminBluetoothManager : MonoBehaviour
         return false;
     }
 
-    //光玄寫法
+    /// <summary>
+    /// 光玄寫法 : 檢查是否是start字串，主要是實驗中會有階段性的問題所以要更新
+    /// </summary>
+    /// <param name="str"></param>
+    /// <returns></returns>
     bool CheckStartString(string str)
     {
         if (!string.IsNullOrEmpty(str) && str.Length >= 5)
