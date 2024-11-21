@@ -11,6 +11,7 @@ public class GarminBluetoothManager : MonoBehaviour
 
     public bool connectionStatus = false;
     public static GarminBluetoothManager instance;
+    public static GarminBluetoothManager Instance => instance;
     
     public static LabDataManager labDataManager;
 

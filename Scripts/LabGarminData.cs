@@ -3,46 +3,46 @@ using LabFrame2023;
 [System.Serializable]
 public class LabGarminData : LabDataBase
 {
+    /// <summary> 心率 </summary>
     public int heartRate;
+    /// <summary> 靜息心率 </summary>
     public int restingHeartRate;
+    /// <summary> 心率變異度(RR-interval) </summary>
     public int heartRateVariability;
+    /// <summary> 手錶加速度 (X) </summary>
     public int accelerometer_x;
+    /// <summary> 手錶加速度 (Y) </summary>
     public int accelerometer_y;
+    /// <summary> 手錶加速度 (Z) </summary>
     public int accelerometer_z;
-    public int steps;
+    /// <summary> 步數 </summary>
+    public int steps;    
+    /// <summary> 總消耗卡路里 </summary>
     public int calories_Total;
+    /// <summary>  </summary>
     public int calories_Active;
+    /// <summary> 爬階梯數 </summary>
     public int floors_Climb;
+    /// <summary> 下階梯數 </summary>
     public int floors_Descend;
+    /// <summary>  </summary>
     public int intensityMinutes_Moderate;
+    /// <summary>  </summary>
     public int intensityMinutes_Vigorous;
+    /// <summary> 壓力指數 </summary>
     public int stressLevel;
+    /// <summary> 血氧濃度 </summary>
     public int SPO2;
+    /// <summary> "Body Battery" </summary>
     public int bodyBattery;
+
+    /// <summary> 呼吸速率 </summary>
     public int respiration;
     public string time;
     public string tag;
 
     public LabGarminData()
     {
-        this.heartRate = 0;
-        this.restingHeartRate = 0;
-        this.heartRateVariability = 0;
-        this.accelerometer_x = 0;
-        this.accelerometer_y = 0;
-        this.accelerometer_z = 0;
-        this.steps = 0;
-        this.calories_Total = 0;
-        this.calories_Active = 0;
-        this.floors_Climb = 0;
-        this.floors_Descend = 0;
-        this.intensityMinutes_Moderate = 0;
-        this.intensityMinutes_Vigorous = 0;
-        this.stressLevel = 0;
-        this.SPO2 = 0;
-        this.bodyBattery = 0;
-        this.respiration = 0;
-        this.time = "null";
-        this.tag = "null";
+        
     }
 }
