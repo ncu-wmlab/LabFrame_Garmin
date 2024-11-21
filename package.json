@@ -21,7 +21,7 @@
       {
         "displayName": "Sample",
         "description": "You'll need XR Interaction Toolkit v.2.0 or newer to run this sample.",
-        "path": "Samples~/"
+        "path": "Samples~/Sample"
       }
     ]
   } 
