@@ -4,124 +4,147 @@ using System.Collections.Generic;
 using System;
 using System.Text;
 using System.Linq;
+using LabFrame2023;
 
-public class GarminBluetoothManager : MonoBehaviour
+public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IManager
 {
-    private BluetoothManager bluetoothManager;
+    /// <summary>
+    /// 目前是否已連線？
+    /// </summary>
+    public bool connectionStatus => BluetoothManager.Instance.IsConnected();
 
-    public bool connectionStatus = false;
-    public static GarminBluetoothManager instance;
-    public static GarminBluetoothManager Instance => instance;
-    
-    public static LabDataManager labDataManager;
-
-    private StringBuilder receivedData = new StringBuilder();
-
-    string incompleteData = "";
-
+    /// <summary>
+    /// 目前的資料
+    /// </summary>
     public LabGarminData labGarminData = new LabGarminData();
+    
+    
+    StringBuilder receivedData = new StringBuilder();
+
+    string incompleteData = "";    
 
 
     // 初始化
-    void Start()
-    {
-        if (instance)
-        {
-            Destroy(gameObject);
-            return;
-        }
-        instance = this;
-        DontDestroyOnLoad(gameObject);
+    // void Start()
+    // {
 
-        bluetoothManager = BluetoothManager.Instance; // 使用 BluetoothManager 的單例
-        bluetoothManager.ManagerInit(); // 初始化藍牙
-        bluetoothManager.StartDiscovery(); // 開始搜尋藍牙裝置
-        try
-        {
-            bluetoothManager.CheckPermission(); // 檢查是否有開啟藍牙權限
-        }
-        catch (Exception ex)
-        {
-            Debug.LogWarning($"Failed to disconnect device,because of {ex.Message}.");
-        }
+    //     // bluetoothManager = BluetoothManager.Instance; // 使用 BluetoothManager 的單例
+    //     // bluetoothManager.ManagerInit(); // 初始化藍牙
+    //     bluetoothManager.StartDiscovery(); // 開始搜尋藍牙裝置
+    //     try
+    //     {
+    //         bluetoothManager.CheckPermission(); // 檢查是否有開啟藍牙權限
+    //     }
+    //     catch (Exception ex)
+    //     {
+    //         Debug.LogWarning($"Failed to disconnect device,because of {ex.Message}.");
+    //     }
+    // }
+
+
+    public void ManagerInit()
+    {
+        BluetoothManager.Instance.CheckPermission();        
     }
 
+    public IEnumerator ManagerDispose()
+    {
+        DisconnectDevice();
+        yield break;
+    }
+
+    /* -------------------------------------------------------------------------- */
 
 
     /// <summary>
-    /// 藍芽連線的總管，這邊就是用來接收從外部傳來的訊息，並且做出相對應的動作
+    /// 透過 message 字串去做相對應的動作。對於使用 UI Button 控制可以很方便。如果是要寫腳本可以不需要用到這個方法。
     /// </summary>
     /// <param name="message"></param>
     public void ConnectionManager(string message)
     {
         if (message.Equals("connect"))
         {
-            ConnectToDevice();
+            ConnectToDevice();            
         }
         else if (message.Equals("stop"))
         {
             CancelInvoke("StartReceiveData");
+            return;
         }
         else if (message.Equals("disconnect"))
         {
             //CancelInvoke("StartReceiveData");
             DisconnectDevice();
+            return;
         }
 
-        //Case start
+        // Case start
         bool messageIsSend = false;
         while(!messageIsSend)
         {
-            messageIsSend = bluetoothManager.Send(message);
+            messageIsSend = BluetoothManager.Instance.Send(message);
         }
+
+        // 開始接收資料: "start"
         if (CheckStartString(message))
         {
-            // Set the data receiving rate 
             StartCoroutine(ReceiveData());
         }
-
-
     }
 
-    // 取得藍牙裝置的 MAC 位址
-    public string GetMacAddress()
+    /* -------------------------------------------------------------------------- */
+
+    /// <summary>
+    /// 連接到藍牙裝置
+    /// </summary>
+    /// <param name="deviceName">有裝 GarminCompanion2024 裝置的名稱</param>
+    public void ConnectToDevice(string deviceName="Galaxy Tab A9+")
     {
-        List<BluetoothDevice> devices = bluetoothManager.GetAvailableDevices();
-        foreach (BluetoothDevice device in devices)
+        if(BluetoothManager.Instance.IsConnected())
         {
-            if (device.name == "Galaxy Tab A9+") // 裝置名稱
+            Debug.LogWarning("[GarminBluetoothManager] Already connected to a device.");
+            return;
+        }
+
+        // StopAllCoroutines();
+        StartCoroutine(ConnectToDeviceAsync(deviceName));  // 裝置名稱
+    }
+
+    IEnumerator ConnectToDeviceAsync(string deviceName)
+    {
+        
+        Debug.Log($"[GarminBluetoothManager] Start Connect to \"{deviceName}\"");
+
+        BluetoothManager.Instance.CheckPermission();
+        BluetoothManager.Instance.StartDiscovery();
+
+        yield return new WaitForSecondsRealtime(3);
+
+        while(!BluetoothManager.Instance.IsConnected())
+        {
+            var devices = BluetoothManager.Instance.GetAvailableDevices();
+            if(devices.Any(d => d.name == deviceName))
             {
-                return device.mac;
+                Debug.Log($"[GarminBluetoothManager] Found device \"{deviceName}\", now connecting...");
+                BluetoothManager.Instance.Connect(devices.First(d => d.name == deviceName).mac);
             }
+            yield return null;
         }
-        return null;
+
+        Debug.Log("[GarminBluetoothManager] Connected to "+ BluetoothManager.Instance.GetConnectedDevice());
     }
 
-    // 連接到藍牙裝置
-    public void ConnectToDevice()
-    {
-        string macAddress = GetMacAddress();
-        if (bluetoothManager.CheckAvailable())
-        {
-            // 使用 BluetoothManager 的方法連接裝置
-            if(bluetoothManager.Connect(macAddress))
-            {    
-                connectionStatus = true;
-            }
-        }
-        else
-        {
-            Debug.LogWarning("Bluetooth is not available on this device.");
-        }
-    }
+    /* -------------------------------------------------------------------------- */
 
-    // 發送數據
+    /// <summary>
+    /// 發送數據
+    /// </summary>
+    /// <param name="data"></param>
     public void SendData(string data)
     {
         if (connectionStatus)
         {
-            bool success = bluetoothManager.Send(data); // 使用 BluetoothManager 的 Send 方法
-            if (!success)
+            if (!BluetoothManager.Instance.Send(data))
             {
                 Debug.LogWarning("Failed to send data.");
             }
@@ -132,39 +155,45 @@ public class GarminBluetoothManager : MonoBehaviour
         }
     }
 
-    // 停止藍牙連接
+    /// <summary>
+    /// 停止藍牙連接
+    /// </summary>
     public void DisconnectDevice()
     {
+        Debug.Log("[GarminBluetoothManager] Disconnecting...");
+        StopAllCoroutines();
         try
         {
             if (connectionStatus)
-            {
-                bluetoothManager.Stop(); // 使用 BluetoothManager 的方法斷開裝置
-                connectionStatus = false;
+            {                
+                BluetoothManager.Instance.Stop(); // 使用 BluetoothManager 的方法斷開裝置
+                // connectionStatus = false;
             }
         }
         catch(Exception ex)
         {
-            Debug.LogWarning($"Failed to disconnect device,because of {ex.Message}");
+            Debug.LogWarning($"Failed to disconnect device: {ex.Message}");
         }
     }
-    
-    
 
-
+    /* -------------------------------------------------------------------------- */
+    
+    /// <summary>
+    /// 開始接收數據
+    /// </summary>
     public void StartReceiveData()
     {
         StartCoroutine(ReceiveData());
     }
     
     // 接收數據
-    public IEnumerator ReceiveData()
+    IEnumerator ReceiveData()
     {
-        while (bluetoothManager.IsConnected()) // While the device is connected
+        while (BluetoothManager.Instance.IsConnected()) // While the device is connected
         {
-            if (bluetoothManager.Available() > 0)
+            while (BluetoothManager.Instance.Available() > 0)
             {
-                string data = bluetoothManager.ReadLine(); // Read data from BluetoothManager
+                string data = BluetoothManager.Instance.ReadLine(); // Read data from BluetoothManager
                 int endIndex = data.IndexOf('}'); // Find the index of the closing brace
 
                 if (endIndex != -1)
@@ -190,9 +219,8 @@ public class GarminBluetoothManager : MonoBehaviour
         }
     }
 
-
     /// <summary>
-    /// 將處理好的資料送到LabDataManager
+    /// 將處理好的資料送到 LabDataManager
     /// </summary>
     /// <param name="data"></param>
     private void ProcessReceivedData(string data)
@@ -205,7 +233,11 @@ public class GarminBluetoothManager : MonoBehaviour
     }
 
 
-    //光玄寫法，處理收到的資料變成json格式
+    /// <summary>
+    /// 光玄寫法，處理收到的資料變成json格式
+    /// </summary>
+    /// <param name="jsonString"></param>
+    /// <returns></returns>
     List<LabGarminData> DeserializeLabGarminDataList(string jsonString)
     {
         List<LabGarminData> dataList = new List<LabGarminData>();
@@ -226,10 +258,10 @@ public class GarminBluetoothManager : MonoBehaviour
             {
                 tmpJson = tmpJson + "}";
             }
-            LabGarminData data = new LabGarminData();
+
             try
             {
-                data = JsonUtility.FromJson<LabGarminData>(tmpJson);
+                LabGarminData data = JsonUtility.FromJson<LabGarminData>(tmpJson);
                 if (CheckDisconnectMessage(data.tag))
                 {
                     DisconnectDevice();
@@ -291,7 +323,11 @@ public class GarminBluetoothManager : MonoBehaviour
         return dataList;
     }
 
-    //光玄寫法 : 就是用來檢查是否是斷線訊息
+    /// <summary>
+    /// 光玄寫法 : 就是用來檢查是否是斷線訊息
+    /// </summary>
+    /// <param name="str"></param>
+    /// <returns></returns>
     bool CheckDisconnectMessage(string str)
     {
         if (str.Equals("device_disconnect"))
@@ -314,4 +350,6 @@ public class GarminBluetoothManager : MonoBehaviour
         }
         return false;
     }
+
+    
 }
