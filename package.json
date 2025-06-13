@@ -2,7 +2,7 @@
     "name": "com.xrlab.labframe_garmin",
     "version": "1.0.3",
     "displayName": "Lab Frame 2023 - Garmin Watch Plugin",
-    "description": "Garmin Support for LabFrame2023.\nNote: Currently only supports PICO!!",
+    "description": "Garmin Support for LabFrame2023.\nNote: Currently only supports Garmin Watch in lab!!",
     "unity": "2021.3",
     "unityRelease": "9f1",
     "documentationUrl": "https://github.com/ncu-wmlab/LabFrame2023",
@@ -21,7 +21,7 @@
       {
         "displayName": "Sample",
         "description": "You'll need XR Interaction Toolkit v.2.0 or newer to run this sample.",
-        "path": "Samples~/"
+        "path": "Samples~/Sample"
       }
     ]
   } 

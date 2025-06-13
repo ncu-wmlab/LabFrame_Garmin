@@ -56,7 +56,7 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
     }
 
     /// <summary>
-    /// 藍芽連線的總管，這邊就是用來接收從外部傳來的訊息，並且做出相對應的動作
+    /// 透過 message 字串去做相對應的動作。對於使用 UI Button 控制可以很方便。如果是要寫腳本可以不需要用到這個方法。
     /// </summary>
     /// <param name="message"></param>
     public void ConnectionManager(string message)
@@ -70,11 +70,13 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         {
             CancelInvoke("StartReceiveData");
             return;
+            return;
         }
         else if (message.Equals("disconnect"))
         {
             //CancelInvoke("StartReceiveData");
             DisconnectDevice();
+            return;
             return;
         }
         StartCoroutine(SafeSendAfterConnect(message));
@@ -204,9 +206,13 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         }
     }
 
-    // 停止藍牙連接
+    /// <summary>
+    /// 停止藍牙連接
+    /// </summary>
     public void DisconnectDevice()
     {
+        Debug.Log("[GarminBluetoothManager] Disconnecting...");
+        StopAllCoroutines();
         try
         {
             if (connectionStatus)
@@ -217,13 +223,13 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         }
         catch(Exception ex)
         {
-            Debug.LogWarning($"Failed to disconnect device,because of {ex.Message}");
+            Debug.LogWarning($"Failed to disconnect device: {ex.Message}");
         }
     }
        
     
     // 接收數據
-    public IEnumerator ReceiveData()
+    IEnumerator ReceiveData()
     {
         while (BluetoothManager.Instance.IsConnected()) // While the device is connected
         {
@@ -255,9 +261,8 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         }
     }
 
-
     /// <summary>
-    /// 將處理好的資料送到LabDataManager
+    /// 將處理好的資料送到 LabDataManager
     /// </summary>
     /// <param name="data"></param>
     private void ProcessReceivedData(string data)
@@ -291,10 +296,10 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
             {
                 tmpJson = tmpJson + "}";
             }
-            LabGarminData data = new LabGarminData();
+
             try
             {
-                data = JsonUtility.FromJson<LabGarminData>(tmpJson);
+                LabGarminData data = JsonUtility.FromJson<LabGarminData>(tmpJson);
                 if (CheckDisconnectMessage(data.tag))
                 {
                     DisconnectDevice();
@@ -356,7 +361,11 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         return dataList;
     }
 
-    //光玄寫法 : 就是用來檢查是否是斷線訊息
+    /// <summary>
+    /// 光玄寫法 : 就是用來檢查是否是斷線訊息
+    /// </summary>
+    /// <param name="str"></param>
+    /// <returns></returns>
     bool CheckDisconnectMessage(string str)
     {
         if (str.Equals("device_disconnect"))
@@ -379,4 +388,6 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         }
         return false;
     }
+
+    
 }
