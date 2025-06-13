@@ -1,6 +1,6 @@
 {
     "name": "com.xrlab.labframe_garmin",
-    "version": "1.0.1",
+    "version": "1.0.3",
     "displayName": "Lab Frame 2023 - Garmin Watch Plugin",
     "description": "Garmin Support for LabFrame2023.\nNote: Currently only supports PICO!!",
     "unity": "2021.3",
