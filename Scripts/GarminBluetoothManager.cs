@@ -70,13 +70,11 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         {
             CancelInvoke("StartReceiveData");
             return;
-            return;
         }
         else if (message.Equals("disconnect"))
         {
             //CancelInvoke("StartReceiveData");
             DisconnectDevice();
-            return;
             return;
         }
         StartCoroutine(SafeSendAfterConnect(message));
