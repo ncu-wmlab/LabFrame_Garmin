@@ -323,11 +323,17 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
                 // 先 Peek 再送，成功才移除。送失敗的指令留在佇列裡，
                 // 否則像 stop 這種沒有其他恢復機制的指令會直接消失。
                 string command = _outgoing.Peek();
-                if (_link.Send(command))
+                bool sent = _link.Send(command);
+
+                // 不論成敗都重設計時器：失敗時若不重設，會變成每幀重試並每幀印一次
+                // 警告。實務上 Send 失敗多半伴隨狀態轉為 Failed 而使迴圈立刻結束，
+                // 但不該依賴那個巧合。
+                sinceLastCommand = 0f;
+
+                if (sent)
                 {
                     _outgoing.Dequeue();
                     Debug.Log($"{LogPrefix} 已送出：{command}");
-                    sinceLastCommand = 0f;
                 }
                 else
                 {
