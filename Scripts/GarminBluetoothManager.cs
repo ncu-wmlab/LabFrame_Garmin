@@ -38,6 +38,13 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
     private bool _userDisconnected;
     private bool _protocolMismatchReported;
 
+    /// <summary>
+    /// 使用者是否主動送出過 stop。用來區分「從未開始」與「刻意停止」——
+    /// 兩者的 Streaming 都是 false，但只有前者該提醒「你還沒送 start」，
+    /// 後者沒有資料本來就是預期結果，不該發警告。
+    /// </summary>
+    private bool _stoppedByUser;
+
     /// <summary>目前的資料。</summary>
     public LabGarminData labGarminData = new LabGarminData();
 
@@ -111,6 +118,7 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
                 return;
 
             case GarminCommandKind.Stop:
+                _stoppedByUser = true;
                 // 尚未連線時不該為了送 stop 而建立連線
                 if (_lifecycle != null)
                 {
@@ -119,6 +127,10 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
                 return;
 
             default:
+                if (kind == GarminCommandKind.Start)
+                {
+                    _stoppedByUser = false;
+                }
                 // start 與 tag 都要讓對面知道，必要時順帶把連線帶起來
                 StartLink();
                 EnqueueCommand(command);
@@ -311,6 +323,7 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         float sinceLastData = 0f;
         float sinceLastCommand = commandGapSec;
         bool noDataWarned = false;
+        bool receivedDataLogged = false;
 
         while (_link != null && _link.State == GarminLinkState.Connected && !_userDisconnected)
         {
@@ -342,10 +355,26 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
             }
 
             bool gotAny = false;
+            bool gotRecord = false;
             while (_link.TryReadLine(out string line))
             {
                 gotAny = true;
-                HandleLine(line);
+                if (HandleLine(line))
+                {
+                    gotRecord = true;
+                }
+            }
+
+            // 每條連線報一次。成功接收若完全不出聲，Console 會一片安靜，
+            // 使用者無從分辨「正在正常接收」與「根本沒連上」——實際踩過這個坑。
+            // 條件必須是「真的解析出一筆紀錄」而非「收到一行」：協定不符時
+            // 每秒都會收到行卻沒有一筆能用，這時宣告成功會與上面的錯誤自相矛盾。
+            if (gotRecord && !receivedDataLogged)
+            {
+                receivedDataLogged = true;
+                Debug.Log($"{LogPrefix} 已開始接收資料（每秒一筆，之後不再逐筆記錄）。" +
+                          $"首筆：heartRate={labGarminData.heartRate}、" +
+                          $"SPO2={labGarminData.SPO2}、time={labGarminData.time}");
             }
 
             if (gotAny)
@@ -356,7 +385,8 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
             else
             {
                 sinceLastData += Time.unscaledDeltaTime;
-                if (!noDataWarned && sinceLastData >= noDataWarningSec)
+                // 使用者主動 stop 之後沒有資料是預期結果，不該發警告
+                if (!noDataWarned && !_stoppedByUser && sinceLastData >= noDataWarningSec)
                 {
                     noDataWarned = true;
                     if (_session.Streaming)
@@ -378,7 +408,11 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         }
     }
 
-    private void HandleLine(string line)
+    /// <summary>
+    /// 處理一行資料。回傳是否真的解析出一筆可用的紀錄——「收到一行」不等於
+    /// 「收到資料」，協定不符時每秒都會收到行，卻沒有任何一筆能用。
+    /// </summary>
+    private bool HandleLine(string line)
     {
         GarminParseResult result = LabGarminParser.TryParse(line, out LabGarminData data);
 
@@ -398,14 +432,14 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
                     Debug.LogError($"{LogPrefix} 寫入資料時發生例外（資料已解析成功，" +
                                    $"問題出在 LabDataManager 或其訂閱者）：{e}");
                 }
-                return;
+                return true;
 
             case GarminParseResult.Empty:
-                return;
+                return false;
 
             case GarminParseResult.Malformed:
                 Debug.LogWarning($"{LogPrefix} 無法解析的資料，已丟棄：{Truncate(line)}");
-                return;
+                return false;
 
             case GarminParseResult.ProtocolMismatch:
                 if (!_protocolMismatchReported)
@@ -416,7 +450,10 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
                         "請將 Android 端 Transmit 分頁切到 LabGarmin (legacy)。" +
                         $"收到的內容：{Truncate(line)}");
                 }
-                return;
+                return false;
+
+            default:
+                return false;
         }
     }
 
