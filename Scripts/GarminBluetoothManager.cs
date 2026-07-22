@@ -1,38 +1,64 @@
-﻿using System.Collections;
-using UnityEngine;
-using System.Collections.Generic;
 using System;
-using System.Text;
-using System.Linq;
+using System.Collections;
+using System.Collections.Generic;
 using LabFrame2023;
-using System.Data.Common;
+using UnityEngine;
 
+/// <summary>
+/// 連到 Android 端的 Garmin Streaming App 接收生理資料。
+/// 預設走 TCP；藍牙 SPP 為可選傳輸，由 Inspector 明確指定，不會自動切換。
+/// </summary>
 public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IManager
 {
-    /// <summary>
-    /// 目前是否已連線？
-    /// </summary>
-    public bool connectionStatus
-    {
-        get
-        {
-            return BluetoothManager.Instance != null && BluetoothManager.Instance.IsConnected();
-        }
-    }
+    [Header("傳輸方式（不自動切換，網路不通就明確失敗）")]
+    [SerializeField] private GarminTransport transport = GarminTransport.Tcp;
+
+    [Header("TCP")]
+    [SerializeField] private string manualHost = "";
+    [SerializeField] private int manualPort = 6001;
+
+    [Header("Bluetooth（僅 Android/Quest）")]
+    [SerializeField] private string bluetoothDeviceName = "";
+
+    [Header("連線行為")]
+    [SerializeField] private float connectTimeoutSec = 10f;
+    [SerializeField] private float reconnectIntervalSec = 2f;
+    [SerializeField] private float noDataWarningSec = 5f;
+    [Tooltip("相鄰兩則指令的最小間隔。Android 端讀的是原始 chunk 不是逐行，" +
+             "兩則指令若黏在一起會被當成一則解析。")]
+    [SerializeField] private float commandGapSec = 0.15f;
+
+    private const string LogPrefix = "[GarminBluetoothManager]";
+
+    private readonly GarminSessionState _session = new GarminSessionState();
+    private readonly Queue<string> _outgoing = new Queue<string>();
+
+    private IGarminLink _link;
+    private Coroutine _lifecycle;
+    private bool _userDisconnected;
+    private bool _protocolMismatchReported;
 
     /// <summary>
-    /// 目前的資料
+    /// 使用者是否主動送出過 stop。用來區分「從未開始」與「刻意停止」——
+    /// 兩者的 Streaming 都是 false，但只有前者該提醒「你還沒送 start」，
+    /// 後者沒有資料本來就是預期結果，不該發警告。
     /// </summary>
+    private bool _stoppedByUser;
+
+    /// <summary>目前的資料。</summary>
     public LabGarminData labGarminData = new LabGarminData();
-    
-    StringBuilder receivedData = new StringBuilder();
 
-    string incompleteData = "";
+    /// <summary>目前是否已連線。</summary>
+    public bool connectionStatus => _link != null && _link.State == GarminLinkState.Connected;
+
+    /// <summary>是否偵測到協定不符（Android 端多半停在 JSONL）。資料全數不可用。</summary>
+    public bool ProtocolMismatchDetected => _protocolMismatchReported;
+
+    /* -------------------------------------------------------------------------- */
 
     public void ManagerInit()
     {
-        StartCoroutine(DelayedInit());
-        Debug.Log("[GarminBluetoothManager] GarminBluetoothManager is ManagerInit.");
+        Debug.Log($"{LogPrefix} ManagerInit（transport={transport}）");
     }
 
     public IEnumerator ManagerDispose()
@@ -41,353 +67,402 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         yield break;
     }
 
-    /* -------------------------------------------------------------------------- */
-    private IEnumerator DelayedInit()
+    /// <summary>
+    /// 場景切換或 Editor 停止 Play 時，ManagerDispose 不保證會被呼叫。
+    /// 這裡確保 socket 一定會被關掉——Android 端的 CommandServer 在有 client 掛著時
+    /// 不會監聽新連線，遺留的 socket 會讓後續所有連線嘗試都被拒絕。
+    /// </summary>
+    protected override void DoOnDestroy()
     {
-        yield return new WaitUntil(() => BluetoothManager.Instance != null);
-        try 
-        {
-            BluetoothManager.Instance.CheckPermission(); // 檢查是否有開啟藍牙權限
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"[GarminBluetoothManager] Init failed on: {e.Message}");
-        }
+        _link?.Dispose();
+        _link = null;
     }
 
+    private void OnValidate()
+    {
+#if !UNITY_ANDROID
+        if (transport == GarminTransport.Bluetooth)
+        {
+            Debug.LogWarning($"{LogPrefix} 目前建置目標不是 Android，藍牙傳輸無法使用，請改用 TCP。");
+        }
+#endif
+    }
+
+    /* -------------------------------------------------------------------------- */
+
     /// <summary>
-    /// 透過 message 字串去做相對應的動作。對於使用 UI Button 控制可以很方便。如果是要寫腳本可以不需要用到這個方法。
+    /// 以字串下達動作，方便綁在 UI Button 上。
+    /// connect / start / start,tag / stop / disconnect，其餘字串視為 tag。
     /// </summary>
-    /// <param name="message"></param>
     public void ConnectionManager(string message)
     {
-        if (message.Equals("connect"))
+        if (string.IsNullOrWhiteSpace(message))
         {
-            ConnectToDevice();
+            Debug.LogWarning($"{LogPrefix} 收到空白指令，已忽略");
             return;
         }
-        else if (message.Equals("stop"))
+
+        string command = message.Trim();
+        GarminCommandKind kind = _session.Interpret(command);
+
+        switch (kind)
         {
-            CancelInvoke("StartReceiveData");
-            return;
-            return;
+            case GarminCommandKind.Connect:
+                // Android 在被動接聽下收到 connect 不會有任何動作（規格 §4），
+                // 送出去只會增加指令黏包的風險，所以這裡只在本地啟動連線。
+                StartLink();
+                return;
+
+            case GarminCommandKind.Disconnect:
+                DisconnectDevice();
+                return;
+
+            case GarminCommandKind.Stop:
+                _stoppedByUser = true;
+                // 尚未連線時不該為了送 stop 而建立連線
+                if (_lifecycle != null)
+                {
+                    EnqueueCommand(command);
+                }
+                return;
+
+            default:
+                if (kind == GarminCommandKind.Start)
+                {
+                    _stoppedByUser = false;
+                }
+                // start 與 tag 都要讓對面知道，必要時順帶把連線帶起來
+                StartLink();
+                EnqueueCommand(command);
+                return;
         }
-        else if (message.Equals("disconnect"))
-        {
-            //CancelInvoke("StartReceiveData");
-            DisconnectDevice();
-            return;
-            return;
-        }
-        StartCoroutine(SafeSendAfterConnect(message));
     }
 
-    /* -------------------------------------------------------------------------- */
+    /// <summary>設定 TCP 連線目標。供實驗腳本在執行期指定，取代 Inspector 設定。</summary>
+    public void SetTcpTarget(string host, int port)
+    {
+        manualHost = host;
+        manualPort = port;
+        Debug.Log($"{LogPrefix} TCP 目標設為 {host}:{port}");
+    }
 
     /// <summary>
-    /// 連接到藍牙裝置
+    /// 送出任意字串給 Android 端。與 ConnectionManager 走同一條路徑，
+    /// 以免經由這裡送出的 tag 沒有被記錄、重連後補送時遺失。
     /// </summary>
-    /// <param name="deviceName">有裝 GarminCompanion2024 裝置的名稱</param>
-    public void ConnectToDevice(string deviceName="Galaxy Tab A9+")
-    {
-        if(BluetoothManager.Instance.IsConnected())
-        {
-            Debug.LogWarning("[GarminBluetoothManager] Already connected to a device.");
-            return;
-        }
-        else
-        {
-            Debug.Log("[GarminBluetoothManager] Not connected to a device.");
-        }
-
-        // StopAllCoroutines();
-        StartCoroutine(ConnectToDeviceAsync(deviceName));  // 裝置名稱
-    }
-
-    IEnumerator ConnectToDeviceAsync(string deviceName)
-    {
-        
-        Debug.Log($"[GarminBluetoothManager] Start Connect to \"{deviceName}\"");
-
-        BluetoothManager.Instance.CheckPermission();
-        BluetoothManager.Instance.StartDiscovery();
-
-        yield return new WaitForSecondsRealtime(3);
-        var devices = BluetoothManager.Instance.GetAvailableDevices();
-        var targetDevice = devices.FirstOrDefault(d => d.name == deviceName);
-
-        if (targetDevice.name == null)
-        {
-            Debug.LogWarning($"[GarminBluetoothManager] Device \"{deviceName}\" not found.");
-            yield break;
-        }
-
-        Debug.Log($"[GarminBluetoothManager] Found \"{targetDevice.name}\" ({targetDevice.mac}). Connecting...");
-
-        bool success = BluetoothManager.Instance.Connect(targetDevice.mac, ""); // pin 預設空字串
-
-        if (!success)
-        {
-            Debug.LogError("[GarminBluetoothManager] Connect failed.");
-            yield break;
-        }
-
-        float timeout = 10f;
-        float elapsed = 0f;
-        while (!BluetoothManager.Instance.IsConnected() && elapsed < timeout)
-        {
-            yield return new WaitForSeconds(0.5f);
-            elapsed += 0.5f;
-        }
-
-        if (BluetoothManager.Instance.IsConnected())
-        {
-            Debug.Log("[GarminBluetoothManager] Connected to device: " + BluetoothManager.Instance.GetConnectedDevice());
-        }
-        else
-        {
-            Debug.LogError("[GarminBluetoothManager] Connection timed out.");
-        }
-    }
-
-    private IEnumerator SafeSendAfterConnect(string message)
-    {
-        float timeout = 10f;
-        float timer = 0f;
-
-        // 等待藍牙成功連線
-        while (!connectionStatus && timer < timeout)
-        {
-            yield return new WaitForSeconds(0.5f);
-            timer += 0.5f;
-        }
-
-        if (!connectionStatus)
-        {
-            Debug.LogWarning("[GarminBluetoothManager] Failed to send message; device not connected.");
-            yield break;
-        }
-
-        // 確保資料發送成功
-        bool messageIsSent = false;
-        while (!messageIsSent)
-        {
-            messageIsSent = BluetoothManager.Instance.Send(message);
-            yield return null;
-        }
-
-        Debug.Log($"[GarminBluetoothManager] Message sent: {message}");
-
-        if (CheckStartString(message))
-        {
-            StartCoroutine(ReceiveData());
-        }
-    }
-
-
-    /* -------------------------------------------------------------------------- */
-
-    /// <summary>
-    /// 發送數據
-    /// </summary>
-    /// <param name="data"></param>
     public void SendData(string data)
     {
-        if (connectionStatus)
+        ConnectionManager(data);
+    }
+
+    /// <summary>主動斷線，並停止自動重連。</summary>
+    public void DisconnectDevice()
+    {
+        Debug.Log($"{LogPrefix} 使用者主動斷線");
+        _userDisconnected = true;
+
+        if (_link != null && _link.State == GarminLinkState.Connected)
         {
-            if (!BluetoothManager.Instance.Send(data))
-            {
-                Debug.LogWarning("Failed to send data.");
-            }
+            _link.Send("disconnect");
         }
-        else
+
+        if (_lifecycle != null)
         {
-            Debug.LogWarning("No device is connected.");
+            StopCoroutine(_lifecycle);
+            _lifecycle = null;
         }
+
+        _link?.Dispose();
+        _link = null;
+        _outgoing.Clear();
+    }
+
+    /* -------------------------------------------------------------------------- */
+
+    private void StartLink()
+    {
+        _userDisconnected = false;
+        if (_lifecycle == null)
+        {
+            _lifecycle = StartCoroutine(LifecycleLoop());
+        }
+    }
+
+    private void EnqueueCommand(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            return;
+        }
+        _outgoing.Enqueue(command.Trim());
     }
 
     /// <summary>
-    /// 停止藍牙連接
+    /// 佇列裡是否已經有會開啟串流的指令。連線成功後補送 start 之前要先問這個：
+    /// 若使用者在連線建立前就按了 start，該指令已排在佇列中，補送會變成送兩次。
+    /// Android 端的 startSession 有 isRecording 防護所以不會出錯，但多送一則指令
+    /// 徒增指令黏包的風險，log 也會出現兩次「已送出」造成誤判。
     /// </summary>
-    public void DisconnectDevice()
+    private bool HasPendingStartCommand()
     {
-        Debug.Log("[GarminBluetoothManager] Disconnecting...");
-        StopAllCoroutines();
-        try
+        foreach (string queued in _outgoing)
         {
-            if (connectionStatus)
-            {                
-                BluetoothManager.Instance.Stop(); // 使用 BluetoothManager 的方法斷開裝置
-                // connectionStatus = false;
+            if (queued.StartsWith("start", StringComparison.Ordinal))
+            {
+                return true;
             }
         }
-        catch(Exception ex)
+        return false;
+    }
+
+    private IGarminLink CreateLink()
+    {
+        if (transport == GarminTransport.Bluetooth)
         {
-            Debug.LogWarning($"Failed to disconnect device: {ex.Message}");
+            return new BluetoothGarminLink(bluetoothDeviceName);
+        }
+        return new TcpGarminLink(manualHost, manualPort);
+    }
+
+    private string DescribeTarget()
+    {
+        return transport == GarminTransport.Bluetooth
+            ? $"藍牙裝置 \"{bluetoothDeviceName}\"（來源：Inspector 設定）"
+            : $"{manualHost}:{manualPort}（來源：手動設定）";
+    }
+
+    /// <summary>
+    /// 首次連線與重連走同一段流程，避免兩套路徑行為不一致。
+    /// </summary>
+    private IEnumerator LifecycleLoop()
+    {
+        // 協程被例外中止時，finally 仍會執行，確保 _lifecycle 不會卡在已死的 handle 上
+        // 而讓 StartLink() 再也無法重啟。
+        try
+        {
+            yield return LifecycleLoopBody();
+        }
+        finally
+        {
+            _lifecycle = null;
         }
     }
-       
-    
-    // 接收數據
-    IEnumerator ReceiveData()
+
+    private IEnumerator LifecycleLoopBody()
     {
-        while (BluetoothManager.Instance.IsConnected()) // While the device is connected
+        int attempt = 0;
+
+        while (!_userDisconnected)
         {
-            while (BluetoothManager.Instance.Available() > 0)
+            attempt++;
+            string attemptLabel = attempt == 1 ? "" : $"（第 {attempt} 次嘗試）";
+            Debug.Log($"{LogPrefix} 連線中 → {DescribeTarget()}{attemptLabel}");
+
+            _link = CreateLink();
+            _protocolMismatchReported = false;
+            _link.BeginConnect();
+
+            float elapsed = 0f;
+            while (_link.State == GarminLinkState.Connecting && elapsed < connectTimeoutSec)
             {
-                string data = BluetoothManager.Instance.ReadLine(); // Read data from BluetoothManager
-                int endIndex = data.IndexOf('}'); // Find the index of the closing brace
+                _link.Poll();
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
 
-                if (endIndex != -1)
+            if (_link.State != GarminLinkState.Connected)
+            {
+                string reason = _link.State == GarminLinkState.Connecting
+                    ? $"逾時（{connectTimeoutSec} 秒）"
+                    : _link.LastError;
+                Debug.LogWarning($"{LogPrefix} 連線失敗：{reason}");
+                _link.Dispose();
+                _link = null;
+
+                if (_userDisconnected)
                 {
-                    receivedData.Append(data.Substring(0, endIndex + 1)); // Append data up to and including the closing brace
-                    if(!receivedData.ToString().Equals("error"))
-                    {
-                        ProcessReceivedData(receivedData.ToString()); // Process the complete data
-                    }
-                    receivedData.Clear(); // Clear the StringBuilder for the next set of datas
+                    break;
+                }
+                yield return new WaitForSecondsRealtime(reconnectIntervalSec);
+                continue;
+            }
 
-                    if(endIndex + 1 < data.Length)
-                    {
-                        receivedData.Append(data.Substring(endIndex + 1));
-                    }
+            Debug.Log($"{LogPrefix} 已連線 → {DescribeTarget()}");
+            attempt = 0;
+
+            // 重連後補送 start，否則對面不會再送資料。
+            // 但若佇列裡已經有尚未送出的 start（使用者在連線建立前就按了 start），
+            // 那則指令已經承載了同樣的意圖，補送會變成送兩次。
+            string resume = _session.BuildResumeCommand();
+            if (!string.IsNullOrEmpty(resume) && !HasPendingStartCommand())
+            {
+                Debug.Log($"{LogPrefix} 補送 \"{resume}\" 以恢復串流");
+                _outgoing.Enqueue(resume);
+            }
+
+            yield return ReceiveLoop();
+
+            if (_userDisconnected)
+            {
+                _link?.Dispose();
+                _link = null;
+                break;
+            }
+
+            Debug.LogWarning($"{LogPrefix} 連線中斷：{_link?.LastError ?? "未知原因"}");
+            _link?.Dispose();
+            _link = null;
+
+            Debug.Log($"{LogPrefix} {reconnectIntervalSec} 秒後重連");
+            yield return new WaitForSecondsRealtime(reconnectIntervalSec);
+        }
+    }
+
+    private IEnumerator ReceiveLoop()
+    {
+        float sinceLastData = 0f;
+        float sinceLastCommand = commandGapSec;
+        bool noDataWarned = false;
+        bool receivedDataLogged = false;
+
+        while (_link != null && _link.State == GarminLinkState.Connected && !_userDisconnected)
+        {
+            _link.Poll();
+
+            // 指令一次只送一則且彼此隔開，避免 Android 端把相鄰指令當成一則解析
+            sinceLastCommand += Time.unscaledDeltaTime;
+            if (_outgoing.Count > 0 && sinceLastCommand >= commandGapSec)
+            {
+                // 先 Peek 再送，成功才移除。送失敗的指令留在佇列裡，
+                // 否則像 stop 這種沒有其他恢復機制的指令會直接消失。
+                string command = _outgoing.Peek();
+                bool sent = _link.Send(command);
+
+                // 不論成敗都重設計時器：失敗時若不重設，會變成每幀重試並每幀印一次
+                // 警告。實務上 Send 失敗多半伴隨狀態轉為 Failed 而使迴圈立刻結束，
+                // 但不該依賴那個巧合。
+                sinceLastCommand = 0f;
+
+                if (sent)
+                {
+                    _outgoing.Dequeue();
+                    Debug.Log($"{LogPrefix} 已送出：{command}");
                 }
                 else
                 {
-                    receivedData.Append(data); // Append the entire data if no closing brace is found
+                    Debug.LogWarning($"{LogPrefix} 送出失敗，保留於佇列待重試：{command}");
                 }
             }
+
+            bool gotAny = false;
+            bool gotRecord = false;
+            while (_link.TryReadLine(out string line))
+            {
+                gotAny = true;
+                if (HandleLine(line))
+                {
+                    gotRecord = true;
+                }
+            }
+
+            // 每條連線報一次。成功接收若完全不出聲，Console 會一片安靜，
+            // 使用者無從分辨「正在正常接收」與「根本沒連上」——實際踩過這個坑。
+            // 條件必須是「真的解析出一筆紀錄」而非「收到一行」：協定不符時
+            // 每秒都會收到行卻沒有一筆能用，這時宣告成功會與上面的錯誤自相矛盾。
+            if (gotRecord && !receivedDataLogged)
+            {
+                receivedDataLogged = true;
+                Debug.Log($"{LogPrefix} 已開始接收資料（每秒一筆，之後不再逐筆記錄）。" +
+                          $"首筆：heartRate={labGarminData.heartRate}、" +
+                          $"SPO2={labGarminData.SPO2}、time={labGarminData.time}");
+            }
+
+            if (gotAny)
+            {
+                sinceLastData = 0f;
+                noDataWarned = false;
+            }
+            else
+            {
+                sinceLastData += Time.unscaledDeltaTime;
+                // 使用者主動 stop 之後沒有資料是預期結果，不該發警告
+                if (!noDataWarned && !_stoppedByUser && sinceLastData >= noDataWarningSec)
+                {
+                    noDataWarned = true;
+                    if (_session.Streaming)
+                    {
+                        Debug.LogWarning(
+                            $"{LogPrefix} 已連線並已送出 start，但 {noDataWarningSec} 秒內" +
+                            "沒有收到任何資料。請確認 Android 端正在串流。");
+                    }
+                    else
+                    {
+                        Debug.LogWarning(
+                            $"{LogPrefix} 已連線但尚未送出 start，因此不會有任何資料。" +
+                            "送出 start 後 Android 端才會開始傳送。");
+                    }
+                }
+            }
+
             yield return null;
         }
     }
 
     /// <summary>
-    /// 將處理好的資料送到 LabDataManager
+    /// 處理一行資料。回傳是否真的解析出一筆可用的紀錄——「收到一行」不等於
+    /// 「收到資料」，協定不符時每秒都會收到行，卻沒有任何一筆能用。
     /// </summary>
-    /// <param name="data"></param>
-    private void ProcessReceivedData(string data)
+    private bool HandleLine(string line)
     {
-        List<LabGarminData> _dataList = DeserializeLabGarminDataList(data);
-        foreach(LabGarminData _data in _dataList)
+        GarminParseResult result = LabGarminParser.TryParse(line, out LabGarminData data);
+
+        switch (result)
         {
-            LabDataManager.Instance.WriteData(_data);
+            case GarminParseResult.Ok:
+                labGarminData = data;
+                try
+                {
+                    // WriteData 會同步觸發 WriteDataAction，那是開放給實驗腳本訂閱的委派。
+                    // 訂閱者拋例外不該讓整條接收協程死掉——協程一旦中止，connectionStatus
+                    // 仍會回報 true，現場沒有任何訊號可循。
+                    LabDataManager.Instance.WriteData(data);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"{LogPrefix} 寫入資料時發生例外（資料已解析成功，" +
+                                   $"問題出在 LabDataManager 或其訂閱者）：{e}");
+                }
+                return true;
+
+            case GarminParseResult.Empty:
+                return false;
+
+            case GarminParseResult.Malformed:
+                Debug.LogWarning($"{LogPrefix} 無法解析的資料，已丟棄：{Truncate(line)}");
+                return false;
+
+            case GarminParseResult.ProtocolMismatch:
+                if (!_protocolMismatchReported)
+                {
+                    _protocolMismatchReported = true;
+                    Debug.LogError(
+                        $"{LogPrefix} 協定不符 —— 收到的不是 LabGarmin 格式（缺少 time 欄位）。" +
+                        "請將 Android 端 Transmit 分頁切到 LabGarmin (legacy)。" +
+                        $"收到的內容：{Truncate(line)}");
+                }
+                return false;
+
+            default:
+                return false;
         }
     }
 
-
-    //學長寫法，處理收到的資料變成json格式
-    List<LabGarminData> DeserializeLabGarminDataList(string jsonString)
+    private static string Truncate(string text)
     {
-        List<LabGarminData> dataList = new List<LabGarminData>();
-        jsonString = jsonString.Replace("}{", "},{");
-        string[] jsonStrings = jsonString.Split(new[] { "},{" }, System.StringSplitOptions.None);
-
-        // Process incomplete data.
-        int _offset = 0;
-        if (incompleteData.Length > 0)
+        if (string.IsNullOrEmpty(text) || text.Length <= 120)
         {
-            string tmpJson = incompleteData + jsonStrings[0];
-            _offset = 1;
-            if (!tmpJson.StartsWith("{"))
-            {
-                tmpJson = "{" + tmpJson;
-            }
-            if (!tmpJson.EndsWith("}"))
-            {
-                tmpJson = tmpJson + "}";
-            }
-
-            try
-            {
-                LabGarminData data = JsonUtility.FromJson<LabGarminData>(tmpJson);
-                if (CheckDisconnectMessage(data.tag))
-                {
-                    DisconnectDevice();
-                    return dataList;
-                }
-                else
-                {
-                    labGarminData = data;
-                    dataList.Add(data);
-                    incompleteData = "";
-                }
-            }
-            catch(Exception ex)
-            {
-                Debug.LogWarning($"Failed to deserialize data, because of {ex.Message}");
-                incompleteData = "";
-            }
+            return text;
         }
-
-        foreach (var jsonStr in jsonStrings.Skip(_offset))
-        {
-            string json = jsonStr;
-            if (!jsonStr.StartsWith("{"))
-            {
-                json = "{" + json;
-            }
-            if (!jsonStr.EndsWith("}"))
-            {
-                json = json + "}";
-            }
-            LabGarminData data = new LabGarminData();
-            try
-            {
-                data = JsonUtility.FromJson<LabGarminData>(json);
-                if (CheckDisconnectMessage(data.tag))
-                {
-                    DisconnectDevice();
-                    return dataList;
-                }
-                else
-                {
-                    labGarminData = data;
-                    dataList.Add(data);
-                }
-            }
-            catch
-            {
-                if (jsonStr.StartsWith("{"))
-                {
-                    json = json.Substring(1);
-                }
-                if (jsonStr.EndsWith("}"))
-                {
-                    json = json.Substring(0, json.Length - 1);
-                }
-                incompleteData = json;
-            }
-        }
-        return dataList;
+        return text.Substring(0, 120) + "…";
     }
-
-    /// <summary>
-    /// 光玄寫法 : 就是用來檢查是否是斷線訊息
-    /// </summary>
-    /// <param name="str"></param>
-    /// <returns></returns>
-    bool CheckDisconnectMessage(string str)
-    {
-        if (str.Equals("device_disconnect"))
-        {
-            return true;
-        }
-        return false;
-    }
-
-    /// <summary>
-    /// 學長寫法 : 檢查是否是start字串 主要是實驗中會有階段性的問題所以要更新
-    /// </summary>
-    /// <param name="str"></param>
-    /// <returns></returns>
-    bool CheckStartString(string str)
-    {
-        if (!string.IsNullOrEmpty(str) && str.Length >= 5)
-        {
-            return str.Substring(0, 5).Equals("start");
-        }
-        return false;
-    }
-
-    
 }
