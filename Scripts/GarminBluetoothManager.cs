@@ -174,6 +174,24 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         _outgoing.Enqueue(command.Trim());
     }
 
+    /// <summary>
+    /// 佇列裡是否已經有會開啟串流的指令。連線成功後補送 start 之前要先問這個：
+    /// 若使用者在連線建立前就按了 start，該指令已排在佇列中，補送會變成送兩次。
+    /// Android 端的 startSession 有 isRecording 防護所以不會出錯，但多送一則指令
+    /// 徒增指令黏包的風險，log 也會出現兩次「已送出」造成誤判。
+    /// </summary>
+    private bool HasPendingStartCommand()
+    {
+        foreach (string queued in _outgoing)
+        {
+            if (queued.StartsWith("start", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private IGarminLink CreateLink()
     {
         if (transport == GarminTransport.Bluetooth)
@@ -235,9 +253,11 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
             Debug.Log($"{LogPrefix} 已連線 → {DescribeTarget()}");
             attempt = 0;
 
-            // 重連後補送 start，否則對面不會再送資料
+            // 重連後補送 start，否則對面不會再送資料。
+            // 但若佇列裡已經有尚未送出的 start（使用者在連線建立前就按了 start），
+            // 那則指令已經承載了同樣的意圖，補送會變成送兩次。
             string resume = _session.BuildResumeCommand();
-            if (!string.IsNullOrEmpty(resume))
+            if (!string.IsNullOrEmpty(resume) && !HasPendingStartCommand())
             {
                 Debug.Log($"{LogPrefix} 補送 \"{resume}\" 以恢復串流");
                 _outgoing.Enqueue(resume);
