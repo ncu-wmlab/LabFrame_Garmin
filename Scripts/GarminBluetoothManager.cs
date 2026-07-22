@@ -60,6 +60,17 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         yield break;
     }
 
+    /// <summary>
+    /// 場景切換或 Editor 停止 Play 時，ManagerDispose 不保證會被呼叫。
+    /// 這裡確保 socket 一定會被關掉——Android 端的 CommandServer 在有 client 掛著時
+    /// 不會監聽新連線，遺留的 socket 會讓後續所有連線嘗試都被拒絕。
+    /// </summary>
+    protected override void DoOnDestroy()
+    {
+        _link?.Dispose();
+        _link = null;
+    }
+
     private void OnValidate()
     {
 #if !UNITY_ANDROID
@@ -213,6 +224,20 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
     /// </summary>
     private IEnumerator LifecycleLoop()
     {
+        // 協程被例外中止時，finally 仍會執行，確保 _lifecycle 不會卡在已死的 handle 上
+        // 而讓 StartLink() 再也無法重啟。
+        try
+        {
+            yield return LifecycleLoopBody();
+        }
+        finally
+        {
+            _lifecycle = null;
+        }
+    }
+
+    private IEnumerator LifecycleLoopBody()
+    {
         int attempt = 0;
 
         while (!_userDisconnected)
@@ -279,8 +304,6 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
             Debug.Log($"{LogPrefix} {reconnectIntervalSec} 秒後重連");
             yield return new WaitForSecondsRealtime(reconnectIntervalSec);
         }
-
-        _lifecycle = null;
     }
 
     private IEnumerator ReceiveLoop()
@@ -297,16 +320,19 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
             sinceLastCommand += Time.unscaledDeltaTime;
             if (_outgoing.Count > 0 && sinceLastCommand >= commandGapSec)
             {
-                string command = _outgoing.Dequeue();
+                // 先 Peek 再送，成功才移除。送失敗的指令留在佇列裡，
+                // 否則像 stop 這種沒有其他恢復機制的指令會直接消失。
+                string command = _outgoing.Peek();
                 if (_link.Send(command))
                 {
+                    _outgoing.Dequeue();
                     Debug.Log($"{LogPrefix} 已送出：{command}");
+                    sinceLastCommand = 0f;
                 }
                 else
                 {
-                    Debug.LogWarning($"{LogPrefix} 送出失敗，將於重連後補送：{command}");
+                    Debug.LogWarning($"{LogPrefix} 送出失敗，保留於佇列待重試：{command}");
                 }
-                sinceLastCommand = 0f;
             }
 
             bool gotAny = false;
@@ -324,12 +350,21 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
             else
             {
                 sinceLastData += Time.unscaledDeltaTime;
-                if (!noDataWarned && _session.Streaming && sinceLastData >= noDataWarningSec)
+                if (!noDataWarned && sinceLastData >= noDataWarningSec)
                 {
                     noDataWarned = true;
-                    Debug.LogWarning(
-                        $"{LogPrefix} 已連線但 {noDataWarningSec} 秒內沒有收到任何資料。" +
-                        "請確認已送出 start，且 Android 端正在串流。");
+                    if (_session.Streaming)
+                    {
+                        Debug.LogWarning(
+                            $"{LogPrefix} 已連線並已送出 start，但 {noDataWarningSec} 秒內" +
+                            "沒有收到任何資料。請確認 Android 端正在串流。");
+                    }
+                    else
+                    {
+                        Debug.LogWarning(
+                            $"{LogPrefix} 已連線但尚未送出 start，因此不會有任何資料。" +
+                            "送出 start 後 Android 端才會開始傳送。");
+                    }
                 }
             }
 
@@ -345,7 +380,18 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         {
             case GarminParseResult.Ok:
                 labGarminData = data;
-                LabDataManager.Instance.WriteData(data);
+                try
+                {
+                    // WriteData 會同步觸發 WriteDataAction，那是開放給實驗腳本訂閱的委派。
+                    // 訂閱者拋例外不該讓整條接收協程死掉——協程一旦中止，connectionStatus
+                    // 仍會回報 true，現場沒有任何訊號可循。
+                    LabDataManager.Instance.WriteData(data);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"{LogPrefix} 寫入資料時發生例外（資料已解析成功，" +
+                                   $"問題出在 LabDataManager 或其訂閱者）：{e}");
+                }
                 return;
 
             case GarminParseResult.Empty:

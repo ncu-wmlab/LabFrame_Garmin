@@ -129,7 +129,9 @@ public sealed class BluetoothGarminLink : IGarminLink
 
         try
         {
-            return BluetoothManager.Instance.Send(command);
+            // 與 TcpGarminLink 一致附加換行。plugin 不會自己加，
+            // 而兩則指令若黏在一起，沒有分隔符會比有分隔符更難解析。
+            return BluetoothManager.Instance.Send(command + "\n");
         }
         catch (Exception e)
         {
