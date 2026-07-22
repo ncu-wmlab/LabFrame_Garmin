@@ -6,29 +6,33 @@ using UnityEngine;
 
 /// <summary>
 /// 連到 Android 端的 Garmin Streaming App 接收生理資料。
-/// 預設走 TCP；藍牙 SPP 為可選傳輸，由 Inspector 明確指定，不會自動切換。
+/// 預設走 TCP；藍牙 SPP 為可選傳輸，由設定檔明確指定，不會自動切換。
+///
+/// 連線設定來自 <see cref="GarminConfig"/>（專案層級的 JSON 檔），不是 Inspector 欄位——
+/// 本套件由 scoped registry 安裝時會落在唯讀的 Library/PackageCache，prefab 改不了，
+/// 而且每個專案的平板位址都不同，不該共用套件裡的同一份值。
 /// </summary>
 public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IManager
 {
-    [Header("傳輸方式（不自動切換，網路不通就明確失敗）")]
-    [SerializeField] private GarminTransport transport = GarminTransport.Tcp;
-
-    [Header("TCP")]
-    [SerializeField] private string manualHost = "";
-    [SerializeField] private int manualPort = 6001;
-
-    [Header("Bluetooth（僅 Android/Quest）")]
-    [SerializeField] private string bluetoothDeviceName = "";
-
-    [Header("連線行為")]
-    [SerializeField] private float connectTimeoutSec = 10f;
-    [SerializeField] private float reconnectIntervalSec = 2f;
-    [SerializeField] private float noDataWarningSec = 5f;
-    [Tooltip("相鄰兩則指令的最小間隔。Android 端讀的是原始 chunk 不是逐行，" +
-             "兩則指令若黏在一起會被當成一則解析。")]
-    [SerializeField] private float commandGapSec = 0.15f;
-
     private const string LogPrefix = "[GarminBluetoothManager]";
+
+    private GarminConfig _config;
+
+    /// <summary>
+    /// 連線設定。ManagerInit 尚未執行時（例如場景直接掛著本元件而 LabFrame 還沒起來）
+    /// 會就地載入，避免拿到 null。
+    /// </summary>
+    private GarminConfig Config
+    {
+        get
+        {
+            if (_config == null)
+            {
+                LoadConfig();
+            }
+            return _config;
+        }
+    }
 
     private readonly GarminSessionState _session = new GarminSessionState();
     private readonly Queue<string> _outgoing = new Queue<string>();
@@ -58,7 +62,39 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
 
     public void ManagerInit()
     {
-        Debug.Log($"{LogPrefix} ManagerInit（transport={transport}）");
+        LoadConfig();
+    }
+
+    private void LoadConfig()
+    {
+        try
+        {
+            _config = LabTools.GetConfig<GarminConfig>();
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"{LogPrefix} 讀取 GarminConfig 失敗，改用預設值：{e.Message}");
+        }
+
+        if (_config == null)
+        {
+            _config = new GarminConfig();
+        }
+
+        GarminTransport resolved = _config.ResolveTransport(out string warning);
+        if (warning != null)
+        {
+            Debug.LogWarning($"{LogPrefix} {warning}");
+        }
+
+        Debug.Log($"{LogPrefix} 設定載入完成：transport={resolved}、目標={DescribeTarget()}。" +
+                  $"設定檔位置：{LabTools.GetConfigPath<GarminConfig>()}");
+
+        if (resolved == GarminTransport.Tcp && string.IsNullOrWhiteSpace(_config.Host))
+        {
+            Debug.LogWarning($"{LogPrefix} 設定檔的 Host 是空的，連線會直接失敗。" +
+                             "請填入 Android 平板的 IP，或以 SetTcpTarget() 於執行期指定。");
+        }
     }
 
     public IEnumerator ManagerDispose()
@@ -76,16 +112,6 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
     {
         _link?.Dispose();
         _link = null;
-    }
-
-    private void OnValidate()
-    {
-#if !UNITY_ANDROID
-        if (transport == GarminTransport.Bluetooth)
-        {
-            Debug.LogWarning($"{LogPrefix} 目前建置目標不是 Android，藍牙傳輸無法使用，請改用 TCP。");
-        }
-#endif
     }
 
     /* -------------------------------------------------------------------------- */
@@ -138,12 +164,15 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
         }
     }
 
-    /// <summary>設定 TCP 連線目標。供實驗腳本在執行期指定，取代 Inspector 設定。</summary>
+    /// <summary>
+    /// 以程式指定 TCP 連線目標，覆蓋設定檔的值。要在 connect 之前呼叫；
+    /// 連線建立後才改只會影響下一次連線。
+    /// </summary>
     public void SetTcpTarget(string host, int port)
     {
-        manualHost = host;
-        manualPort = port;
-        Debug.Log($"{LogPrefix} TCP 目標設為 {host}:{port}");
+        Config.Host = host;
+        Config.Port = port;
+        Debug.Log($"{LogPrefix} TCP 目標設為 {host}:{port}（以程式指定，覆蓋設定檔）");
     }
 
     /// <summary>
@@ -217,18 +246,18 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
 
     private IGarminLink CreateLink()
     {
-        if (transport == GarminTransport.Bluetooth)
+        if (Config.ResolveTransport(out _) == GarminTransport.Bluetooth)
         {
-            return new BluetoothGarminLink(bluetoothDeviceName);
+            return new BluetoothGarminLink(Config.BluetoothDeviceName);
         }
-        return new TcpGarminLink(manualHost, manualPort);
+        return new TcpGarminLink(Config.Host, Config.Port);
     }
 
     private string DescribeTarget()
     {
-        return transport == GarminTransport.Bluetooth
-            ? $"藍牙裝置 \"{bluetoothDeviceName}\"（來源：Inspector 設定）"
-            : $"{manualHost}:{manualPort}（來源：手動設定）";
+        return Config.ResolveTransport(out _) == GarminTransport.Bluetooth
+            ? $"藍牙裝置 \"{Config.BluetoothDeviceName}\"（來源：設定檔）"
+            : $"{Config.Host}:{Config.Port}（來源：設定檔）";
     }
 
     /// <summary>
@@ -263,7 +292,7 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
             _link.BeginConnect();
 
             float elapsed = 0f;
-            while (_link.State == GarminLinkState.Connecting && elapsed < connectTimeoutSec)
+            while (_link.State == GarminLinkState.Connecting && elapsed < Config.ConnectTimeoutSec)
             {
                 _link.Poll();
                 elapsed += Time.unscaledDeltaTime;
@@ -273,7 +302,7 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
             if (_link.State != GarminLinkState.Connected)
             {
                 string reason = _link.State == GarminLinkState.Connecting
-                    ? $"逾時（{connectTimeoutSec} 秒）"
+                    ? $"逾時（{Config.ConnectTimeoutSec} 秒）"
                     : _link.LastError;
                 Debug.LogWarning($"{LogPrefix} 連線失敗：{reason}");
                 _link.Dispose();
@@ -283,7 +312,7 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
                 {
                     break;
                 }
-                yield return new WaitForSecondsRealtime(reconnectIntervalSec);
+                yield return new WaitForSecondsRealtime(Config.ReconnectIntervalSec);
                 continue;
             }
 
@@ -313,15 +342,15 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
             _link?.Dispose();
             _link = null;
 
-            Debug.Log($"{LogPrefix} {reconnectIntervalSec} 秒後重連");
-            yield return new WaitForSecondsRealtime(reconnectIntervalSec);
+            Debug.Log($"{LogPrefix} {Config.ReconnectIntervalSec} 秒後重連");
+            yield return new WaitForSecondsRealtime(Config.ReconnectIntervalSec);
         }
     }
 
     private IEnumerator ReceiveLoop()
     {
         float sinceLastData = 0f;
-        float sinceLastCommand = commandGapSec;
+        float sinceLastCommand = Config.CommandGapSec;
         bool noDataWarned = false;
         bool receivedDataLogged = false;
 
@@ -331,7 +360,7 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
 
             // 指令一次只送一則且彼此隔開，避免 Android 端把相鄰指令當成一則解析
             sinceLastCommand += Time.unscaledDeltaTime;
-            if (_outgoing.Count > 0 && sinceLastCommand >= commandGapSec)
+            if (_outgoing.Count > 0 && sinceLastCommand >= Config.CommandGapSec)
             {
                 // 先 Peek 再送，成功才移除。送失敗的指令留在佇列裡，
                 // 否則像 stop 這種沒有其他恢復機制的指令會直接消失。
@@ -386,13 +415,13 @@ public class GarminBluetoothManager : LabSingleton<GarminBluetoothManager>, IMan
             {
                 sinceLastData += Time.unscaledDeltaTime;
                 // 使用者主動 stop 之後沒有資料是預期結果，不該發警告
-                if (!noDataWarned && !_stoppedByUser && sinceLastData >= noDataWarningSec)
+                if (!noDataWarned && !_stoppedByUser && sinceLastData >= Config.NoDataWarningSec)
                 {
                     noDataWarned = true;
                     if (_session.Streaming)
                     {
                         Debug.LogWarning(
-                            $"{LogPrefix} 已連線並已送出 start，但 {noDataWarningSec} 秒內" +
+                            $"{LogPrefix} 已連線並已送出 start，但 {Config.NoDataWarningSec} 秒內" +
                             "沒有收到任何資料。請確認 Android 端正在串流。");
                     }
                     else

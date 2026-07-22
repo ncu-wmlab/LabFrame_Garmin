@@ -1,5 +1,50 @@
 # Changelog
 
+## [1.2.0] - 2026-07-22
+
+### 變更（破壞性）
+
+- **連線設定改由 `GarminConfig` 設定檔提供，`GarminBluetoothManager` 的 Inspector 欄位全部移除。**
+
+  原本把 `transport` / `manualHost` / `manualPort` 等放在套件內 prefab 的
+  `[SerializeField]` 上，這在套件實際的散佈方式下行不通：消費端專案透過 scoped
+  registry 安裝時，套件會落在 **唯讀的 `Library/PackageCache`**，prefab 改不了；
+  而且該 prefab 由 LabFrame 在進入 Play Mode 時才實例化，也無法即時調整。
+  再者每個專案、每次實驗的平板位址都不同，本來就不該共用套件裡的同一份值。
+
+  改用 LabFrame 既有的 `LabTools.GetConfig<T>()` 機制，設定檔位置依平台：
+
+  | 平台 | 路徑 |
+  |---|---|
+  | Editor | `Assets/Resources/Config/GarminConfig.json`（消費端專案自己的） |
+  | Windows build | `{遊戲資料夾}/Config/GarminConfig.json` |
+  | Android / Quest | `{persistentDataPath}/Config/GarminConfig.json` |
+
+  在 Quest 上換平板不需要重新建置：
+
+  ```bash
+  adb push GarminConfig.json /sdcard/Android/data/<包名>/files/Config/
+  ```
+
+  `Transport` 欄位刻意用字串（`"Tcp"` / `"Bluetooth"`，大小寫不拘）而非 enum：
+  `JsonUtility` 會把 enum 序列化成數字，手改設定檔時看到 `"Transport": 1` 無從理解。
+  無法辨識的值會回退 `Tcp` 並輸出說明，不靜默降級。
+
+  `ManagerInit` 會記錄設定檔的實際路徑；`Host` 為空時在啟動當下就警告，
+  不必等到連線失敗才發現。
+
+### 移除
+
+- `GarminBluetoothManager` 的 `OnValidate`。`transport` 不再是序列化欄位，
+  Editor 期已無從檢查；非 Android 平台選用藍牙時，改由
+  `BluetoothGarminLink.BeginConnect()` 以明確訊息失敗。
+
+### 保留
+
+- `SetTcpTarget(host, port)` 仍可於執行期覆蓋設定檔的值，供實驗腳本動態指定。
+
+---
+
 ## [1.1.0] - 2026-07-21
 
 ### 新增
