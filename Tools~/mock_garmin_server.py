@@ -14,6 +14,7 @@ import argparse
 import json
 import random
 import socket
+import sys
 import threading
 import time
 from datetime import datetime
@@ -130,8 +131,27 @@ def main():
     args = parser.parse_args()
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((args.host, args.port))
+
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        # Windows 的 SO_REUSEADDR 語意與 Unix 不同：它會允許第二個程序綁上同一個
+        # port，而連線交給哪一個是不確定的，且完全沒有錯誤訊息。曾經因此讓一個
+        # 殘留的舊 server 攔走 Unity 的連線，現象是「Unity 顯示已連線但新開的
+        # server 終端毫無動靜」，極難察覺。改用 SO_EXCLUSIVEADDRUSE 讓重複啟動
+        # 直接失敗。
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    try:
+        server.bind((args.host, args.port))
+    except OSError as exc:
+        print(f"無法綁定 {args.host}:{args.port} — {exc}")
+        print("多半是已經有一個 mock server 還開著（可能是先前忘了關的）。")
+        print("找出並關掉它再重試：")
+        print(f'  netstat -ano | findstr ":{args.port}"')
+        print("  taskkill /PID <上面查到的 pid> /F")
+        return 1
+
     server.listen(1)
     print(f"監聽 {args.host}:{args.port}（protocol={args.protocol}）")
     print("等待 Unity 連進來。送出 start 之前不會有任何資料。")
@@ -147,6 +167,8 @@ def main():
     finally:
         server.close()
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
