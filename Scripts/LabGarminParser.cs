@@ -49,12 +49,28 @@ public static class LabGarminParser
         // 缺漏欄位留預設值，回傳一個全零物件。若 Android 端停在 JSONL 模式送
         // ExperimentRecord（與本型別只有 tag 一個欄位重疊），沒有這道關卡就會靜默寫入
         // 整場全 0 的資料。LabGarminFormatter 一定會輸出 time，ExperimentRecord 沒有這個欄位。
-        if (string.IsNullOrEmpty(parsed.time))
+        if (!LooksLikeLabGarminTime(parsed.time))
         {
             return GarminParseResult.ProtocolMismatch;
         }
 
         data = parsed;
         return GarminParseResult.Ok;
+    }
+
+    /// <summary>
+    /// LabGarminFormatter 固定輸出 yyyy-MM-dd HH-mm-ss-SSS，一定同時含有 '-' 與 ' '。
+    /// 只檢查非空是不夠的：JsonUtility 會把 {"time":12345} 靜默轉成字串 "12345"、
+    /// {"time":true} 轉成 "true"，兩者都非空卻不是 LabGarmin 的時間格式。
+    /// 這裡不比對完整格式，避免 Android 端調整毫秒位數就誤判。
+    /// </summary>
+    private static bool LooksLikeLabGarminTime(string time)
+    {
+        if (string.IsNullOrWhiteSpace(time))
+        {
+            return false;
+        }
+
+        return time.IndexOf('-') >= 0 && time.IndexOf(' ') >= 0;
     }
 }

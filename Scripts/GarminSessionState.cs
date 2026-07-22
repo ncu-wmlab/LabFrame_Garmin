@@ -1,3 +1,5 @@
+using System;
+
 /// <summary>
 /// 上行指令的類別。語意須與 Android 端 BtCommandParser 一致。
 /// </summary>
@@ -29,29 +31,31 @@ public sealed class GarminSessionState
     {
         string trimmed = (message ?? string.Empty).Trim();
 
-        if (trimmed.StartsWith("disconnect"))
+        if (trimmed.StartsWith("disconnect", StringComparison.Ordinal))
         {
             Streaming = false;
             return GarminCommandKind.Disconnect;
         }
 
-        if (trimmed.StartsWith("connect"))
+        if (trimmed.StartsWith("connect", StringComparison.Ordinal))
         {
             return GarminCommandKind.Connect;
         }
 
-        if (trimmed.StartsWith("start"))
+        if (trimmed.StartsWith("start", StringComparison.Ordinal))
         {
             Streaming = true;
+            // 與 Android 端 BtCommandParser.substringAfterComma 對齊：只要找得到逗號就取其後
+            // 的內容，逗號在結尾時得到空字串（代表「清掉 tag」），不可沿用舊值。
             int comma = trimmed.IndexOf(',');
-            if (comma >= 0 && comma + 1 < trimmed.Length)
+            if (comma >= 0)
             {
                 Tag = trimmed.Substring(comma + 1);
             }
             return GarminCommandKind.Start;
         }
 
-        if (trimmed.StartsWith("stop"))
+        if (trimmed.StartsWith("stop", StringComparison.Ordinal))
         {
             Streaming = false;
             return GarminCommandKind.Stop;

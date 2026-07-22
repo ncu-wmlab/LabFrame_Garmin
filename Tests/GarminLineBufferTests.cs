@@ -99,4 +99,30 @@ public class GarminLineBufferTests
         Assert.IsTrue(buffer.TryReadLine(out string line));
         Assert.AreEqual("{\"tag\":\"實驗\"}", line);
     }
+
+    [Test]
+    public void 四位元組字元被切在chunk邊界_仍能正確還原()
+    {
+        // U+1F600 是 4-byte UTF-8、UTF-16 需要一組 surrogate pair 表示。
+        // 這是 Append 容量計算最吃緊的路徑：解碼器暫存 3 個 byte 後，
+        // 下一次僅 1 個 byte 就要一次吐出 2 個 char。
+        const string emoji = "\U0001F600";
+        byte[] all = Bytes("{\"tag\":\"" + emoji + "\"}\n");
+
+        // 切在 emoji 四個 byte 的第 3 個之後，讓解碼器暫存 3 個 byte
+        const int split = 11;
+
+        var head = new byte[split];
+        System.Array.Copy(all, 0, head, 0, split);
+        var tail = new byte[all.Length - split];
+        System.Array.Copy(all, split, tail, 0, all.Length - split);
+
+        var buffer = new GarminLineBuffer();
+        buffer.Append(head, head.Length);
+        Assert.IsFalse(buffer.TryReadLine(out _));
+
+        buffer.Append(tail, tail.Length);
+        Assert.IsTrue(buffer.TryReadLine(out string line));
+        Assert.AreEqual("{\"tag\":\"" + emoji + "\"}", line);
+    }
 }

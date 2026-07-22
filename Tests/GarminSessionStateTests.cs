@@ -118,4 +118,41 @@ public class GarminSessionStateTests
         Assert.AreEqual(GarminCommandKind.Start, state.Interpret("  start,T01  "));
         Assert.AreEqual("T01", state.Tag);
     }
+
+    [Test]
+    public void 結尾逗號的start_清空tag而非沿用舊值()
+    {
+        var state = new GarminSessionState();
+        state.Interpret("start,T01");
+
+        state.Interpret("start,");
+
+        Assert.AreEqual(string.Empty, state.Tag);
+        Assert.AreEqual("start", state.BuildResumeCommand(),
+            "tag 已被清空，補送指令不可夾帶先前的 T01");
+    }
+
+    [Test]
+    public void null與空字串_視為tag且不拋例外()
+    {
+        var state = new GarminSessionState();
+
+        Assert.AreEqual(GarminCommandKind.Tag, state.Interpret(null));
+        Assert.AreEqual(string.Empty, state.Tag);
+
+        Assert.AreEqual(GarminCommandKind.Tag, state.Interpret(""));
+        Assert.AreEqual(string.Empty, state.Tag);
+    }
+
+    [Test]
+    public void disconnect之後_保留tag但沒有補送指令()
+    {
+        var state = new GarminSessionState();
+        state.Interpret("start,T01");
+
+        state.Interpret("disconnect");
+
+        Assert.AreEqual("T01", state.Tag);
+        Assert.IsNull(state.BuildResumeCommand());
+    }
 }

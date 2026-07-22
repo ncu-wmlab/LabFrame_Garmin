@@ -77,4 +77,25 @@ public class LabGarminParserTests
         Assert.AreEqual(GarminParseResult.Ok, result);
         Assert.IsNull(data.tag);
     }
+
+    [Test]
+    public void time為數字_JsonUtility會轉成字串_仍須判定協定不符()
+    {
+        Assert.AreEqual(GarminParseResult.ProtocolMismatch,
+            LabGarminParser.TryParse("{\"heartRate\":72,\"time\":12345}", out _));
+    }
+
+    [Test]
+    public void time為布林_仍須判定協定不符()
+    {
+        Assert.AreEqual(GarminParseResult.ProtocolMismatch,
+            LabGarminParser.TryParse("{\"heartRate\":72,\"time\":true}", out _));
+    }
+
+    [Test]
+    public void time為純空白_仍須判定協定不符()
+    {
+        Assert.AreEqual(GarminParseResult.ProtocolMismatch,
+            LabGarminParser.TryParse("{\"heartRate\":72,\"time\":\"   \"}", out _));
+    }
 }
